@@ -6,6 +6,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
+using VRC.SDK3.Avatars.Components;
 
 namespace Goorm.MMDEyeFix
 {
@@ -213,6 +214,12 @@ namespace Goorm.MMDEyeFix
         private BlendShapeList _customRightEyeBlendShapes;
         private BlendShapeList _customMouthBlendShapes;
 
+        private static readonly string[] ApplyTargetLabels =
+        {
+            "All renderers sharing the same mesh",
+            "Selected renderer only"
+        };
+
         private void OnEnable()
         {
             var optimizer = (MMDEyeFix)target;
@@ -250,6 +257,9 @@ namespace Goorm.MMDEyeFix
 
                 if (faceRenderer)
                 {
+                    DrawApplyTargetMode(optimizer, faceRenderer);
+                    EditorGUILayout.Space();
+
                     _leftEyeBlendShapes.DrawEditor(
                         "Left Eye BlendShapes",
                         faceRenderer,
@@ -321,6 +331,53 @@ namespace Goorm.MMDEyeFix
 
 
             EditorUtility.SetDirty(target);
+        }
+
+        private static void DrawApplyTargetMode(MMDEyeFix optimizer, SkinnedMeshRenderer faceRenderer)
+        {
+            var mode = (int)optimizer._applyTargetMode;
+            mode = EditorGUILayout.Popup("Apply Target", mode, ApplyTargetLabels);
+            optimizer._applyTargetMode = (ApplyTargetMode)mode;
+
+            var avatar = optimizer.GetComponentInParent<VRCAvatarDescriptor>();
+            if (avatar == null)
+            {
+                EditorGUILayout.HelpBox("Avatar descriptor not found.", MessageType.Warning);
+                return;
+            }
+
+            var targetRenderers = optimizer
+                .GetTargetRenderers(avatar, faceRenderer, faceRenderer.sharedMesh)
+                .ToList();
+
+            if (targetRenderers.Count == 0)
+            {
+                EditorGUILayout.HelpBox("No renderers will be affected.", MessageType.Warning);
+                return;
+            }
+
+            EditorGUILayout.LabelField("Will affect", EditorStyles.boldLabel);
+            EditorGUI.indentLevel++;
+            foreach (var targetRenderer in targetRenderers)
+            {
+                var meshName = targetRenderer.sharedMesh ? targetRenderer.sharedMesh.name : "(No Mesh)";
+                EditorGUILayout.LabelField($"{GetHierarchyPath(avatar.transform, targetRenderer.transform)} ({meshName})");
+            }
+            EditorGUI.indentLevel--;
+        }
+
+        private static string GetHierarchyPath(Transform root, Transform target)
+        {
+            var names = new List<string>();
+            var current = target;
+            while (current != null && current != root)
+            {
+                names.Add(current.name);
+                current = current.parent;
+            }
+
+            names.Reverse();
+            return names.Count > 0 ? string.Join("/", names) : target.name;
         }
 
         private void OnDisable()

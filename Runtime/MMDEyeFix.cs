@@ -14,10 +14,17 @@ using VRC.Utility;
 
 namespace Goorm.MMDEyeFix
 {
+    public enum ApplyTargetMode
+    {
+        RenderersSharingMesh,
+        SelectedRendererOnly
+    }
+
     [ExecuteInEditMode]
     public class MMDEyeFix : MonoBehaviour, IEditorOnly
     {
         public AvatarObjectReference _faceRenderer = new();
+        public ApplyTargetMode _applyTargetMode = ApplyTargetMode.RenderersSharingMesh;
 
         public List<string> _leftEyeBlendShapes = new();
         public float _leftEyeWeight = 1f;
@@ -77,16 +84,43 @@ namespace Goorm.MMDEyeFix
 
         public bool IsApplied => _originalMesh != null || _fixedMesh != null;
 
-        private static void ApplyMesh(GameObject avatarRootObject, Mesh from, Mesh to)
+        public IEnumerable<SkinnedMeshRenderer> GetTargetRenderers(
+            VRCAvatarDescriptor avatar,
+            SkinnedMeshRenderer faceRenderer,
+            Mesh sourceMesh
+        )
         {
-            var renderers = avatarRootObject
-                .GetComponentsInChildren<SkinnedMeshRenderer>(true)
-                .Where(r => r.sharedMesh == from);
+            if (_applyTargetMode == ApplyTargetMode.SelectedRendererOnly)
+            {
+                return new[] { faceRenderer };
+            }
 
-            foreach (var otherRenderer in renderers) otherRenderer.sharedMesh = to;
+            return avatar.gameObject
+                .GetComponentsInChildren<SkinnedMeshRenderer>(true)
+                .Where(r => r.sharedMesh == sourceMesh);
         }
 
-        private static string GetMeshAssetPath(VRCAvatarDescriptor avatar, SkinnedMeshRenderer renderer)
+        private void ApplyMesh(VRCAvatarDescriptor avatar, SkinnedMeshRenderer faceRenderer, Mesh from, Mesh to)
+        {
+            foreach (var renderer in GetTargetRenderers(avatar, faceRenderer, from))
+            {
+                renderer.sharedMesh = to;
+            }
+        }
+
+        private static string GetShortStableId(UnityEngine.Object obj)
+        {
+            var globalId = GlobalObjectId.GetGlobalObjectIdSlow(obj).ToString();
+            return Hash128.Compute(globalId).ToString()[..8];
+        }
+
+        private static string SanitizeFileName(string fileName)
+        {
+            var invalidChars = Path.GetInvalidFileNameChars();
+            return string.Concat(fileName.Select(c => invalidChars.Contains(c) ? '_' : c));
+        }
+
+        private static string GetMeshAssetPath(VRCAvatarDescriptor avatar, SkinnedMeshRenderer renderer, MMDEyeFix optimizer)
         {
             var folder = AssetDatabase.GUIDToAssetPath(AssetFolderGuid);
             if (string.IsNullOrEmpty(folder)) folder = "Assets/MMDEyeFix/Generated";
@@ -96,7 +130,11 @@ namespace Goorm.MMDEyeFix
             folder = $"{folder}/{avatarId}";
 
             if (!Directory.Exists(folder)) Directory.CreateDirectory(folder);
-            return $"{folder}/{renderer.sharedMesh.name}.asset";
+
+            var meshName = SanitizeFileName(renderer.sharedMesh.name);
+            var rendererId = GetShortStableId(renderer);
+            var optimizerId = GetShortStableId(optimizer);
+            return $"{folder}/{meshName}_{rendererId}_{optimizerId}.asset";
         }
 
         public void Apply(VRCAvatarDescriptor avatar = null)
@@ -130,7 +168,7 @@ namespace Goorm.MMDEyeFix
             Revert(avatar);
 
             Mesh fixedMesh;
-            var path = GetMeshAssetPath(avatar, faceRenderer);
+            var path = GetMeshAssetPath(avatar, faceRenderer, this);
 
             // 캐싱
             var cacheKey = GetCacheKey(faceRenderer);
@@ -144,7 +182,7 @@ namespace Goorm.MMDEyeFix
                     {
                         _originalMesh = faceRenderer.sharedMesh;
                         _fixedMesh = fixedMesh;
-                        ApplyMesh(avatar.gameObject, faceRenderer.sharedMesh, fixedMesh);
+                        ApplyMesh(avatar, faceRenderer, faceRenderer.sharedMesh, fixedMesh);
                         return;
                     }
                 }
@@ -161,7 +199,7 @@ namespace Goorm.MMDEyeFix
             _fixedMesh = fixedMesh;
 
             // Apply fixed mesh
-            ApplyMesh(avatar.gameObject, originalMesh, fixedMesh);
+            ApplyMesh(avatar, faceRenderer, originalMesh, fixedMesh);
         }
 
         public void Revert(VRCAvatarDescriptor avatar = null)
@@ -178,8 +216,22 @@ namespace Goorm.MMDEyeFix
                 }
             }
 
+            var faceGameObject = _faceRenderer.Get(this);
+            if (faceGameObject == null)
+            {
+                Debug.LogError("Face renderer not found.");
+                return;
+            }
+
+            var faceRenderer = faceGameObject.GetComponent<SkinnedMeshRenderer>();
+            if (faceRenderer == null)
+            {
+                Debug.LogError("Face renderer not found.");
+                return;
+            }
+
             // Revert fixed mesh
-            ApplyMesh(avatar.gameObject, _fixedMesh, _originalMesh);
+            ApplyMesh(avatar, faceRenderer, _fixedMesh, _originalMesh);
 
             _originalMesh = null;
             _fixedMesh = null;
@@ -232,6 +284,7 @@ namespace Goorm.MMDEyeFix
             }
 
             // Save into asset
+            AssetDatabase.DeleteAsset(path);
             AssetDatabase.CreateAsset(newMesh, path);
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();

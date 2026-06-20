@@ -1,9 +1,10 @@
 ﻿#if UNITY_EDITOR
 
+using System.Collections.Generic;
 using System.Linq;
 using nadena.dev.ndmf;
-using UnityEditor;
 using UnityEngine;
+using VRC.SDK3.Avatars.Components;
 
 [assembly: ExportsPlugin(typeof(Goorm.MMDEyeFix.NDMFPlugin))]
 
@@ -22,21 +23,60 @@ namespace Goorm.MMDEyeFix
                 {
                     var optimizers = ctx.AvatarRootObject.GetComponentsInChildren<MMDEyeFix>(true);
 
-                    switch (optimizers.Length)
+                    if (optimizers.Length == 0)
                     {
-                        case 0:
-                            return;
-                        case > 1:
-                            Debug.LogError("Multiple MMDEyeFix components found in the avatar. Only one is allowed.");
-                            return;
-                        default:
-                            var optimizer = optimizers.First();
-                            optimizer.RevertOnDisable = false;
-                            optimizer.Apply(ctx.AvatarDescriptor);
-                            Object.DestroyImmediate(optimizer);
-                            break;
+                        return;
+                    }
+
+                    WarnConflictingTargets(optimizers, ctx.AvatarDescriptor);
+
+                    foreach (var optimizer in optimizers)
+                    {
+                        optimizer.RevertOnDisable = false;
+                        optimizer.Apply(ctx.AvatarDescriptor);
+                        Object.DestroyImmediate(optimizer);
                     }
                 });
+        }
+
+        private static void WarnConflictingTargets(MMDEyeFix[] optimizers, VRCAvatarDescriptor avatar)
+        {
+            var faceRenderers = new Dictionary<MMDEyeFix, SkinnedMeshRenderer>();
+            foreach (var optimizer in optimizers)
+            {
+                var faceRenderer = optimizer._faceRenderer.Get(optimizer)?.GetComponent<SkinnedMeshRenderer>();
+                if (faceRenderer == null) continue;
+
+                if (faceRenderers.ContainsValue(faceRenderer))
+                {
+                    Debug.LogWarning($"Multiple MMDEyeFix components target the same renderer: {faceRenderer.name}");
+                }
+
+                faceRenderers[optimizer] = faceRenderer;
+            }
+
+            foreach (var entry in faceRenderers)
+            {
+                var optimizer = entry.Key;
+                var faceRenderer = entry.Value;
+                if (optimizer._applyTargetMode != ApplyTargetMode.RenderersSharingMesh) continue;
+
+                var targetRenderers = optimizer
+                    .GetTargetRenderers(avatar, faceRenderer, faceRenderer.sharedMesh)
+                    .ToList();
+
+                foreach (var otherEntry in faceRenderers)
+                {
+                    var otherOptimizer = otherEntry.Key;
+                    var otherFaceRenderer = otherEntry.Value;
+                    if (otherOptimizer == optimizer || !targetRenderers.Contains(otherFaceRenderer)) continue;
+
+                    Debug.LogWarning(
+                        $"MMDEyeFix on {optimizer.name} uses shared mesh mode and also affects " +
+                        $"{otherFaceRenderer.name}, which is targeted by another MMDEyeFix component."
+                    );
+                }
+            }
         }
     }
 }
